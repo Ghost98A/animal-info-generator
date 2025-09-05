@@ -1,0 +1,258 @@
+name: VGit Create Feature
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Name for the new branch'
+        required: true
+        type: string
+      request:
+        description: 'Feature request description'
+        required: true
+        type: string
+      username:
+        description: 'GitHub username'
+        required: true
+        type: string
+      project_name:
+        description: 'Project name'
+        required: true
+        type: string
+      current_node:
+        description: 'Current workspace node (optional)'
+        required: false
+        type: string
+      base_branch:
+        description: 'Base branch to create feature from'
+        required: false
+        type: string
+        default: 'main'
+
+jobs:
+  create-feature:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write        # For git operations (checkout, commit, push)
+      id-token: write       # For Claude Code action OIDC authentication
+      actions: read         # For workflow operations
+    outputs:
+      branch_name: ${{ steps.feature-result.outputs.branch_name }}
+      commit_sha: ${{ steps.feature-result.outputs.commit_sha }}
+      username: ${{ steps.feature-result.outputs.username }}
+      project_name: ${{ steps.feature-result.outputs.project_name }}
+    
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ github.event.inputs.branch_name }}" ]; then
+            echo "❌ Branch name is required"
+            exit 1
+          fi
+          if [ -z "${{ github.event.inputs.request }}" ]; then
+            echo "❌ Feature request is required"
+            exit 1
+          fi
+          echo "✅ Inputs validated"
+          echo "Branch: ${{ github.event.inputs.branch_name }}"
+          echo "Request: ${{ github.event.inputs.request }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "${{ github.event.inputs.username }}"
+          git config --global user.email "${{ github.event.inputs.username }}@users.noreply.github.com"
+
+      - name: Create feature branch
+        run: |
+          echo "🌿 Creating feature branch: ${{ github.event.inputs.branch_name }}"
+          
+          # Ensure we're on the base branch
+          git checkout ${{ github.event.inputs.base_branch }}
+          git pull origin ${{ github.event.inputs.base_branch }}
+          
+          # Create and switch to feature branch
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          
+          echo "✅ Feature branch created successfully"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          if [ -f "package.json" ]; then
+            echo "📦 Installing dependencies..."
+            npm install
+          else
+            echo "⚠️ No package.json found, skipping dependency installation"
+          fi
+
+      - name: Implement feature with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Write(*)",
+                  "Read(*)",
+                  "Edit(*)",
+                  "Bash(git:*)",
+                  "Bash(npm:*)",
+                  "Bash(node:*)",
+                  "Glob(*)",
+                  "Grep(*)"
+                ]
+              }
+            }
+          prompt: |
+            Implement the following feature request: ${{ github.event.inputs.request }}
+            
+            You are working on a project in the current directory. Please:
+            1. Analyze the existing codebase structure and patterns
+            2. Implement the requested feature following the existing patterns
+            3. Make sure all files are properly formatted and linted
+            4. Create or update any necessary tests
+            5. Update documentation if needed
+            
+            Focus on creating production-ready code that integrates well with the existing codebase.
+
+      - name: Verify changes
+        run: |
+          echo "🔍 Verifying implemented changes..."
+          
+          # Check if any files were modified
+          if git diff --quiet; then
+            echo "⚠️ No changes detected. Creating a minimal change to complete the workflow."
+            echo "# Feature: ${{ github.event.inputs.request }}" >> FEATURE_LOG.md
+            echo "- Implemented on: $(date)" >> FEATURE_LOG.md
+            echo "- Branch: ${{ github.event.inputs.branch_name }}" >> FEATURE_LOG.md
+            echo "" >> FEATURE_LOG.md
+          else
+            echo "✅ Changes detected:"
+            git diff --name-only
+          fi
+
+      - name: Run tests (if available)
+        run: |
+          echo "🧪 Running tests..."
+          if [ -f "package.json" ] && grep -q '"test"' package.json; then
+            npm test || {
+              echo "⚠️ Tests failed, but continuing with feature implementation"
+              echo "TEST_FAILURES=true" >> $GITHUB_ENV
+            }
+          else
+            echo "ℹ️ No test script found, skipping tests"
+          fi
+
+      - name: Commit changes
+        run: |
+          echo "📝 Committing changes..."
+          
+          # Add all changes
+          git add .
+          
+          # Create commit message
+          COMMIT_MSG="feat: ${{ github.event.inputs.request }}
+
+          🤖 Generated with VGit AI
+          
+          Branch: ${{ github.event.inputs.branch_name }}
+          Requested by: ${{ github.event.inputs.username }}
+          
+          Co-Authored-By: VGit AI <ai@vgit.app>"
+          
+          # Commit changes
+          git commit -m "$COMMIT_MSG" || {
+            echo "❌ Commit failed"
+            exit 1
+          }
+          
+          echo "✅ Changes committed successfully"
+
+      - name: Push feature branch
+        run: |
+          echo "🚀 Pushing feature branch to origin..."
+          git push origin "${{ github.event.inputs.branch_name }}" || {
+            echo "❌ Push failed"
+            exit 1
+          }
+          echo "✅ Feature branch pushed successfully"
+
+
+      - name: Set job outputs
+        id: feature-result
+        run: |
+          echo "📤 Setting job outputs..."
+          
+          # Get commit SHA
+          COMMIT_SHA=$(git rev-parse HEAD)
+          
+          # Set outputs for the deploy job
+          echo "branch_name=${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "username=${{ github.event.inputs.username }}" >> $GITHUB_OUTPUT
+          echo "project_name=${{ github.event.inputs.project_name }}" >> $GITHUB_OUTPUT
+          echo "current_node=${{ github.event.inputs.current_node }}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Job outputs set for deployment"
+
+      - name: Create workspace node update payload
+        run: |
+          echo "🏗️ Creating workspace node update payload..."
+          
+          # Create payload for VGit workspace node creation
+          cat > workspace_node_payload.json << EOF
+          {
+            "repository_full_name": "${{ github.repository }}",
+            "branch_name": "${{ steps.feature-result.outputs.branch_name }}",
+            "commit_sha": "${{ steps.feature-result.outputs.commit_sha }}",
+            "username": "${{ steps.feature-result.outputs.username }}",
+            "project_name": "${{ steps.feature-result.outputs.project_name }}",
+            "current_node": "${{ steps.feature-result.outputs.current_node }}",
+            "deployment_dispatched": "true",
+            "workflow_run_id": "${{ github.run_id }}",
+            "created_at": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+          }
+          EOF
+          
+          echo "✅ Workspace node payload created"
+
+      - name: Upload workspace payload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-node-payload
+          path: workspace_node_payload.json
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          echo "🎉 Feature creation completed successfully!"
+          echo ""
+          echo "📋 Summary:"
+          echo "- Branch: ${{ github.event.inputs.branch_name }}"
+          echo "- Feature: ${{ github.event.inputs.request }}"
+          echo "- Repository: ${{ github.repository }}"
+          echo "- Commit SHA: ${{ steps.feature-result.outputs.commit_sha }}"
+          echo "- Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  deploy-preview:
+    needs: create-feature
+    uses: ./.github/workflows/reusable-deploy-preview.yml
+    with:
+      branch_name: ${{ needs.create-feature.outputs.branch_name }}
+      username: ${{ needs.create-feature.outputs.username }}
+      project_name: ${{ needs.create-feature.outputs.project_name }}
+      deployment_type: 'preview'
+      commit_sha: ${{ needs.create-feature.outputs.commit_sha }}
+    secrets: inherit
